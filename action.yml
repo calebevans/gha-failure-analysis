@@ -1,4 +1,4 @@
-name: 'Failure Analysis'
+name: 'GitHub Actions Failure Analysis'
 description: 'AI-powered analysis of GitHub Actions workflow failures'
 branding:
   icon: 'alert-circle'
