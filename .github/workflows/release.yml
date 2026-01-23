@@ -32,42 +32,10 @@ jobs:
           pip install pre-commit
           pre-commit run --all-files
 
-      - name: Install build tools
-        run: pip install build
-
-      - name: Build distributions
-        run: python -m build
-
-      - name: Upload distributions
-        uses: actions/upload-artifact@v6
-        with:
-          name: release-dists
-          path: dist/
-
-  pypi-publish:
-    name: Publish to PyPI
-    runs-on: ubuntu-latest
-    needs: build
-    permissions:
-      id-token: write
-    environment:
-      name: pypi
-      url: https://pypi.org/p/gha-failure-analysis
-
-    steps:
-      - name: Download distributions
-        uses: actions/download-artifact@v6
-        with:
-          name: release-dists
-          path: dist/
-
-      - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
-
   container-release:
     name: Release container image
     runs-on: ubuntu-latest
-    needs: build
+    needs: build  # Wait for tests to pass
     permissions:
       contents: read
       packages: write
