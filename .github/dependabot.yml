@@ -60,3 +60,7 @@ updates:
       include: "scope"
     assignees:
       - "calebevans"
+    ignore:
+      # Keep Python at 3.12 for now
+      - dependency-name: "python"
+        update-types: ["version-update:semver-minor"]
