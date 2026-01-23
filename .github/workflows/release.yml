@@ -3,19 +3,15 @@ name: Release
 on:
   release:
     types: [published]
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: 'Release tag (e.g., v1.0.0)'
-        required: true
-        type: string
 
 jobs:
-  test:
-    name: Run tests
+  build:
+    name: Build Python package
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v6
+      - name: Checkout code
+        uses: actions/checkout@v6
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -36,16 +32,54 @@ jobs:
           pip install pre-commit
           pre-commit run --all-files
 
-  build-and-push-docker:
-    name: Build and push Docker image
+      - name: Install build tools
+        run: pip install build
+
+      - name: Build distributions
+        run: python -m build
+
+      - name: Upload distributions
+        uses: actions/upload-artifact@v6
+        with:
+          name: release-dists
+          path: dist/
+
+  pypi-publish:
+    name: Publish to PyPI
     runs-on: ubuntu-latest
-    needs: test
+    needs: build
+    permissions:
+      id-token: write
+    environment:
+      name: pypi
+      url: https://pypi.org/p/gha-failure-analysis
+
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@v6
+        with:
+          name: release-dists
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+  container-release:
+    name: Release container image
+    runs-on: ubuntu-latest
+    needs: build
     permissions:
       contents: read
       packages: write
+      attestations: write
+      id-token: write
 
     steps:
-      - uses: actions/checkout@v6
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -66,76 +100,23 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
-            type=sha,prefix={{branch}}-
+            type=raw,value=latest
 
-      - name: Build and push Docker image
+      - name: Build and push container image
+        id: push
         uses: docker/build-push-action@v6
         with:
           context: .
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
-          platforms: linux/amd64,linux/arm64
+          cache-to: type=gha,mode=min
 
-  update-major-tag:
-    name: Update major version tag
-    runs-on: ubuntu-latest
-    needs: [test, build-and-push-docker]
-    if: github.event_name == 'release'
-    permissions:
-      contents: write
-
-    steps:
-      - uses: actions/checkout@v6
+      - name: Generate artifact attestation
+        uses: actions/attest-build-provenance@v2
         with:
-          fetch-depth: 0
-
-      - name: Update major version tag
-        run: |
-          # Get the release tag (e.g., v1.2.3)
-          TAG="${{ github.event.release.tag_name }}"
-
-          # Extract major version (e.g., v1)
-          MAJOR_TAG=$(echo $TAG | sed -E 's/^(v[0-9]+)\..*/\1/')
-
-          echo "Updating tag $MAJOR_TAG to point to $TAG"
-
-          # Create or update the major version tag
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag -fa $MAJOR_TAG -m "Update $MAJOR_TAG to $TAG"
-          git push origin $MAJOR_TAG --force
-
-  publish-to-pypi:
-    name: Publish to PyPI
-    runs-on: ubuntu-latest
-    needs: test
-    if: github.event_name == 'release'
-    permissions:
-      id-token: write
-
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: '3.12'
-
-      - name: Install build tools
-        run: |
-          python -m pip install --upgrade pip
-          pip install build twine
-
-      - name: Build package
-        run: python -m build
-
-      - name: Check package
-        run: twine check dist/*
-
-      - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          skip-existing: true
+          subject-name: ghcr.io/${{ github.repository }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
