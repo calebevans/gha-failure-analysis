@@ -1,0 +1,75 @@
+name: 'Failure Analysis'
+description: 'AI-powered analysis of GitHub Actions workflow failures'
+branding:
+  icon: 'alert-circle'
+  color: 'red'
+
+inputs:
+  github-token:
+    description: 'GitHub token for API access'
+    required: true
+  run-id:
+    description: 'Workflow run ID to analyze (defaults to current run)'
+    required: false
+  pr-number:
+    description: 'Manual PR number override (for testing merged/closed PRs)'
+    required: false
+  llm-provider:
+    description: 'LLM provider (openai, anthropic, gemini, ollama)'
+    required: true
+  llm-model:
+    description: 'LLM model name'
+    required: true
+  llm-api-key:
+    description: 'LLM API key'
+    required: true
+  llm-base-url:
+    description: 'Custom LLM API base URL'
+    required: false
+  cordon-device:
+    description: 'Device for cordon (cpu/cuda/mps)'
+    default: 'cpu'
+  cordon-backend:
+    description: 'cordon embedding backend'
+    default: 'sentence-transformers'
+  cordon-model-name:
+    description: 'cordon embedding model name'
+    default: 'all-MiniLM-L6-v2'
+  cordon-api-key:
+    description: 'API key for remote cordon embeddings'
+    required: false
+  cordon-batch-size:
+    description: 'Batch size for cordon embedding generation'
+    default: '32'
+  post-pr-comment:
+    description: 'Post analysis as PR comment'
+    default: 'false'
+  artifact-patterns:
+    description: 'Comma-separated glob patterns for additional artifacts'
+    required: false
+  ignored-jobs:
+    description: 'Comma-separated job names to ignore'
+    required: false
+  ignored-steps:
+    description: 'Comma-separated step names to ignore'
+    required: false
+  analyze-pr-context:
+    description: 'Analyze failures in context of PR changes (true/false)'
+    default: 'true'
+    required: false
+  pr-context-token-budget:
+    description: 'Percentage of context to allocate for PR diffs (0-50)'
+    default: '20'
+    required: false
+
+outputs:
+  summary:
+    description: 'Analysis summary'
+  category:
+    description: 'Failure category'
+  report-path:
+    description: 'Path to full JSON report'
+
+runs:
+  using: 'docker'
+  image: 'Dockerfile'

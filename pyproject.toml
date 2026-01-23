@@ -1,0 +1,55 @@
+[project]
+name = "gha-failure-analysis"
+version = "0.1.0"
+description = "AI-powered analysis of GitHub Actions workflow failures using semantic log preprocessing."
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "Apache-2.0"}
+authors = [
+    {name = "Caleb Evans", email = "caevans@redhat.com"}
+]
+dependencies = [
+    "PyGithub>=2.1.0",
+    "cordon>=0.3.3",
+    "dspy>=2.5.0",
+    "click>=8.1.0",
+    "pydantic>=2.0.0",
+    "tokenizers>=0.13.0",
+    "detect-secrets>=1.4.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "mypy>=1.0.0",
+    "ruff>=0.1.0",
+    "pre-commit>=3.0.0",
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "pytest-mock>=3.10.0",
+]
+
+[project.scripts]
+gha-failure-analysis = "gha_failure_analysis.main:cli"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+strict_equality = true
