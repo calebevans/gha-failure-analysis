@@ -256,7 +256,7 @@ cordon-device: cuda  # or mps for Apple Silicon
 
 The action generates a structured analysis like:
 
-```markdown
+````markdown
 # Workflow Failure Analysis
 **Workflow:** `CI`
 **Run ID:** `1234567890` | **PR:** #123 | **Category:** Test
@@ -290,7 +290,7 @@ ERROR: Timeout waiting for database connection
 Connection pool exhausted: 0/10 connections available
 ```
 </details>
-```
+````
 
 ## Security
 
