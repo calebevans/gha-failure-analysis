@@ -72,6 +72,9 @@ outputs:
 
 runs:
   using: 'docker'
-  image: 'docker://ghcr.io/calebevans/gha-failure-analysis:0.1.2'
+  image: 'docker://ghcr.io/calebevans/gha-failure-analysis:0.1.3'
+  env:
+    INPUT_RUN-ID: ${{ inputs.run-id || github.run_id }}
+    INPUT_PR-NUMBER: ${{ inputs.pr-number || github.event.pull_request.number || '' }}
   args:
     - analyze
