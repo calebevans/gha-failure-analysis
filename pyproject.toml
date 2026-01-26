@@ -1,6 +1,6 @@
 [project]
 name = "gha-failure-analysis"
-version = "0.1.6"
+version = "0.1.7"
 description = "AI-powered analysis of GitHub Actions workflow failures using semantic log preprocessing."
 readme = "README.md"
 requires-python = ">=3.11"
