@@ -3,11 +3,13 @@
 import json
 import logging
 from dataclasses import dataclass
+from typing import Any
 
 import dspy
 
 from ..github.models import PRContext
 from ..github.pr_context import find_related_files, get_relevant_diffs, summarize_changes
+from ..utils import retry_with_backoff
 from .signatures import CorrelateChangesWithFailure
 
 logger = logging.getLogger(__name__)
@@ -44,6 +46,24 @@ class ChangeCorrelator(dspy.Module):  # type: ignore[misc]
         super().__init__()
         self.correlate = dspy.ChainOfThought(CorrelateChangesWithFailure)
 
+    @retry_with_backoff(max_retries=3, base_delay=2.0, rate_limit_delay=10.0)
+    def _call_correlate(
+        self,
+        failure_type: str,
+        failure_identifier: str,
+        failure_details: str,
+        changed_files_summary: str,
+        relevant_diffs: str,
+    ) -> Any:
+        """Call DSPy correlator with retry handling."""
+        return self.correlate(
+            failure_type=failure_type,
+            failure_identifier=failure_identifier,
+            failure_details=failure_details,
+            changed_files_summary=changed_files_summary,
+            relevant_diffs=relevant_diffs,
+        )
+
     def correlate_with_step(
         self,
         step_name: str,
@@ -73,7 +93,7 @@ class ChangeCorrelator(dspy.Module):  # type: ignore[misc]
 
         try:
             # Run LLM correlation
-            result = self.correlate(
+            result = self._call_correlate(
                 failure_type="step",
                 failure_identifier=step_name,
                 failure_details=failure_details,
@@ -155,7 +175,7 @@ class ChangeCorrelator(dspy.Module):  # type: ignore[misc]
 
         try:
             # Run LLM correlation
-            result = self.correlate(
+            result = self._call_correlate(
                 failure_type="test",
                 failure_identifier=test_identifier,
                 failure_details=failure_details,

@@ -1,6 +1,5 @@
 import json
 import logging
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -11,6 +10,7 @@ from ..github.models import FileChange, JobResult, PRContext, StepResult, Workfl
 from ..github.pr_context import find_related_files, get_relevant_diffs, summarize_changes
 from ..parsing.xunit_models import FailedTest
 from ..security.leak_detector import LeakDetector
+from ..utils import retry_with_backoff
 from .correlator import ChangeCorrelator, CorrelationResult, correlations_to_json
 from .signatures import (
     AnalyzeArtifacts,
@@ -21,10 +21,6 @@ from .signatures import (
 )
 
 logger = logging.getLogger(__name__)
-
-# Retry configuration for transient LLM failures
-MAX_RETRIES = 3
-RETRY_BASE_DELAY = 2.0  # seconds
 
 
 def _sanitize_json_string(text: str) -> str:
@@ -297,7 +293,7 @@ class RCAReport:
         if not self.step_analyses:
             return ""
 
-        parts = ["## 📊 Evidence\n\n"]
+        parts = ["<details>\n<summary><b>📊 Evidence</b></summary>\n\n"]
         groups = self._group_similar_failures()
 
         for step_name, analyses in groups.items():
@@ -306,6 +302,7 @@ class RCAReport:
             else:
                 parts.extend(self._format_single_failure(step_name, analyses[0]))
 
+        parts.append("</details>\n\n")
         return "".join(parts)
 
     def _format_multiple_failures(self, step_name: str, analyses: list[StepAnalysis]) -> list[str]:
@@ -477,18 +474,50 @@ class FailureAnalyzer(dspy.Module):  # type: ignore[misc]
             logger.error(f"Failed to read log from {job.log_path}: {e}")
             return "(No log content available)"
 
-    def _analyze_step(self, job: JobResult, step: StepResult, max_retries: int = MAX_RETRIES) -> StepAnalysis:
-        """Analyze a single failed step with retry logic."""
+    @retry_with_backoff(max_retries=3, base_delay=2.0, rate_limit_delay=10.0)
+    def _call_step_analyzer(self, step_name: str, log_content: str, step_context: str, pr_context: str) -> Any:
+        """Call DSPy step analyzer with retry handling."""
+        return self.step_analyzer(
+            step_name=step_name,
+            log_content=log_content,
+            step_context=step_context,
+            pr_context=pr_context,
+        )
+
+    def _analyze_step(self, job: JobResult, step: StepResult) -> StepAnalysis:
+        """Analyze a single failed step with automatic retry logic."""
         logger.info(f"Analyzing step: {job.name}/{step.name}")
 
         step_context = self._get_step_context(job, step)
         log_content = self._read_log_content(job, step)
         pr_context_str = self._prepare_pr_context_for_step(job, step)
 
-        result = self._attempt_step_analysis_with_retry(
-            job, step, log_content, step_context, pr_context_str, max_retries
-        )
-        return result
+        try:
+            result = self._call_step_analyzer(
+                step_name=f"{job.name}/{step.name}",
+                log_content=log_content,
+                step_context=step_context,
+                pr_context=pr_context_str,
+            )
+
+            evidence_list = self._parse_step_evidence(result.evidence, step.name)
+
+            return StepAnalysis(
+                job_name=job.name,
+                step_name=step.name,
+                failure_category=result.failure_category,
+                root_cause=result.root_cause,
+                evidence=evidence_list,
+            )
+        except Exception as e:
+            logger.error(f"Step {step.name}: analysis failed after all retries: {e}")
+            return StepAnalysis(
+                job_name=job.name,
+                step_name=step.name,
+                failure_category="unknown",
+                root_cause=f"Analysis failed: {str(e)}",
+                evidence=[],
+            )
 
     def _prepare_pr_context_for_step(self, job: JobResult, step: StepResult) -> str:
         """Prepare PR context string for step analysis."""
@@ -504,47 +533,6 @@ class FailureAnalyzer(dspy.Module):  # type: ignore[misc]
 
         return changes_summary
 
-    def _attempt_step_analysis_with_retry(
-        self,
-        job: JobResult,
-        step: StepResult,
-        log_content: str,
-        step_context: str,
-        pr_context_str: str,
-        max_retries: int,
-    ) -> StepAnalysis:
-        """Attempt step analysis with retry logic."""
-        last_error: Exception | None = None
-
-        for attempt in range(1, max_retries + 1):
-            try:
-                result = self.step_analyzer(
-                    step_name=f"{job.name}/{step.name}",
-                    log_content=log_content,
-                    step_context=step_context,
-                    pr_context=pr_context_str,
-                )
-
-                evidence_list = self._parse_step_evidence(result.evidence, step.name)
-
-                return StepAnalysis(
-                    job_name=job.name,
-                    step_name=step.name,
-                    failure_category=result.failure_category,
-                    root_cause=result.root_cause,
-                    evidence=evidence_list,
-                )
-            except (json.JSONDecodeError, KeyError) as e:
-                last_error = e
-                if not self._handle_retryable_error(e, step.name, attempt, max_retries):
-                    break
-            except Exception as e:
-                logger.error(f"Step {step.name}: analysis failed: {e}")
-                last_error = e
-                break
-
-        return self._create_failed_step_analysis(job, step, last_error)
-
     def _parse_step_evidence(self, raw_evidence: str | None, step_name: str) -> list[dict[str, str]]:
         """Parse and validate evidence JSON."""
         try:
@@ -556,38 +544,76 @@ class FailureAnalyzer(dspy.Module):  # type: ignore[misc]
             logger.warning(f"Failed to parse evidence JSON for {step_name}: {e}")
             return []
 
-    def _handle_retryable_error(self, error: Exception, step_name: str, attempt: int, max_retries: int) -> bool:
-        """Handle retryable errors and return True if should retry."""
-        if attempt < max_retries:
-            delay = RETRY_BASE_DELAY * (2 ** (attempt - 1))
-            logger.warning(
-                f"Step {step_name} attempt {attempt}/{max_retries} failed: {error}. Retrying in {delay:.1f}s..."
-            )
-            time.sleep(delay)
-            return True
-
-        logger.error(f"Step {step_name} failed after {max_retries} attempts: {error}")
-        return False
-
-    def _create_failed_step_analysis(self, job: JobResult, step: StepResult, error: Exception | None) -> StepAnalysis:
-        """Create a StepAnalysis for a failed analysis attempt."""
-        return StepAnalysis(
-            job_name=job.name,
-            step_name=step.name,
-            failure_category="unknown",
-            root_cause=f"Analysis failed: {str(error)}",
-            evidence=[],
+    @retry_with_backoff(max_retries=3, base_delay=2.0, rate_limit_delay=10.0)
+    def _call_test_analyzer(
+        self,
+        test_identifier: str,
+        failure_type: str,
+        failure_message: str,
+        failure_details: str,
+        pr_context: str,
+    ) -> Any:
+        """Call DSPy test analyzer with retry handling."""
+        return self.test_analyzer(
+            test_identifier=test_identifier,
+            failure_type=failure_type,
+            failure_message=failure_message,
+            failure_details=failure_details,
+            pr_context=pr_context,
         )
 
-    def _analyze_test_failure(self, test: FailedTest, max_retries: int = MAX_RETRIES) -> TestFailureAnalysis:
-        """Analyze a single test failure with retry logic."""
+    @retry_with_backoff(max_retries=3, base_delay=2.0, rate_limit_delay=10.0, context_errors_no_retry=True)
+    def _call_rca_generator(
+        self,
+        workflow_name: str,
+        run_id: str,
+        pr_number: str,
+        failed_steps_analysis: str,
+        failed_tests_analysis: str,
+        additional_context: str,
+        pr_changes_summary: str,
+        change_correlations: str,
+    ) -> Any:
+        """Call DSPy RCA generator with retry handling."""
+        return self.rca_generator(
+            workflow_name=workflow_name,
+            run_id=run_id,
+            pr_number=pr_number,
+            failed_steps_analysis=failed_steps_analysis,
+            failed_tests_analysis=failed_tests_analysis,
+            additional_context=additional_context,
+            pr_changes_summary=pr_changes_summary,
+            change_correlations=change_correlations,
+        )
+
+    def _analyze_test_failure(self, test: FailedTest) -> TestFailureAnalysis:
+        """Analyze a single test failure with automatic retry logic."""
         logger.info(f"Analyzing test: {test.test_identifier}")
 
         details = self._preprocess_test_details(test)
         pr_context_str = self._prepare_pr_context_for_test(test)
 
-        result = self._attempt_test_analysis_with_retry(test, details, pr_context_str, max_retries)
-        return result
+        try:
+            result = self._call_test_analyzer(
+                test_identifier=test.test_identifier,
+                failure_type=test.failure_type or test.error_type or "Unknown",
+                failure_message=test.failure_message or test.error_message or "No message",
+                failure_details=details,
+                pr_context=pr_context_str,
+            )
+
+            return TestFailureAnalysis(
+                test_identifier=test.test_identifier,
+                source_file=test.source_file,
+                root_cause_summary=result.root_cause_summary,
+            )
+        except Exception as e:
+            logger.error(f"Test {test.test_identifier}: analysis failed after all retries: {e}")
+            return TestFailureAnalysis(
+                test_identifier=test.test_identifier,
+                source_file=test.source_file,
+                root_cause_summary=f"Analysis failed: {str(e)}",
+            )
 
     def _preprocess_test_details(self, test: FailedTest) -> str:
         """Preprocess test details if preprocessor is available."""
@@ -611,59 +637,6 @@ class FailureAnalyzer(dspy.Module):  # type: ignore[misc]
             return f"{changes_summary}\n\n{relevant_diffs}"
 
         return changes_summary
-
-    def _attempt_test_analysis_with_retry(
-        self, test: FailedTest, details: str, pr_context_str: str, max_retries: int
-    ) -> TestFailureAnalysis:
-        """Attempt test analysis with retry logic."""
-        last_error: Exception | None = None
-
-        for attempt in range(1, max_retries + 1):
-            try:
-                result = self.test_analyzer(
-                    test_identifier=test.test_identifier,
-                    failure_type=test.failure_type or test.error_type or "Unknown",
-                    failure_message=test.failure_message or test.error_message or "No message",
-                    failure_details=details,
-                    pr_context=pr_context_str,
-                )
-
-                return TestFailureAnalysis(
-                    test_identifier=test.test_identifier,
-                    source_file=test.source_file,
-                    root_cause_summary=result.root_cause_summary,
-                )
-            except (json.JSONDecodeError, KeyError) as e:
-                last_error = e
-                if not self._handle_test_retryable_error(e, test.test_identifier, attempt, max_retries):
-                    break
-            except Exception as e:
-                logger.error(f"Test {test.test_identifier}: analysis failed: {e}")
-                last_error = e
-                break
-
-        return self._create_failed_test_analysis(test, last_error)
-
-    def _handle_test_retryable_error(self, error: Exception, test_id: str, attempt: int, max_retries: int) -> bool:
-        """Handle retryable errors for test analysis and return True if should retry."""
-        if attempt < max_retries:
-            delay = RETRY_BASE_DELAY * (2 ** (attempt - 1))
-            logger.warning(
-                f"Test {test_id} attempt {attempt}/{max_retries} failed: {error}. Retrying in {delay:.1f}s..."
-            )
-            time.sleep(delay)
-            return True
-
-        logger.error(f"Test {test_id} failed after {max_retries} attempts: {error}")
-        return False
-
-    def _create_failed_test_analysis(self, test: FailedTest, error: Exception | None) -> TestFailureAnalysis:
-        """Create a TestFailureAnalysis for a failed analysis attempt."""
-        return TestFailureAnalysis(
-            test_identifier=test.test_identifier,
-            source_file=test.source_file,
-            root_cause_summary=f"Analysis failed: {str(error)}",
-        )
 
     def _analyze_all_test_failures(self, tests: list[FailedTest]) -> list[TestFailureAnalysis]:
         """Analyze all test failures."""
@@ -963,7 +936,7 @@ class FailureAnalyzer(dspy.Module):  # type: ignore[misc]
             pr_num = (
                 str(workflow_analysis.workflow_run.pr_number) if workflow_analysis.workflow_run.pr_number else "N/A"
             )
-            rca = self.rca_generator(
+            rca = self._call_rca_generator(
                 workflow_name=workflow_analysis.workflow_run.name,
                 run_id=str(workflow_analysis.workflow_run.id),
                 pr_number=pr_num,
