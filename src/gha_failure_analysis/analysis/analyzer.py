@@ -7,7 +7,7 @@ from typing import Any
 
 import dspy
 
-from ..github.models import JobResult, PRContext, StepResult, WorkflowAnalysis
+from ..github.models import FileChange, JobResult, PRContext, StepResult, WorkflowAnalysis
 from ..github.pr_context import find_related_files, get_relevant_diffs, summarize_changes
 from ..parsing.xunit_models import FailedTest
 from ..security.leak_detector import LeakDetector
@@ -174,87 +174,123 @@ class RCAReport:
 
         parts = ["## 🔍 PR Impact Assessment\n\n"]
 
-        # Extract likelihood from assessment
-        likelihood = "unknown"
-        if "likelihood: high" in self.pr_impact_assessment.lower():
-            likelihood_emoji = "🔴"
-            likelihood = "High"
-        elif "likelihood: medium" in self.pr_impact_assessment.lower():
-            likelihood_emoji = "🟡"
-            likelihood = "Medium"
-        elif "likelihood: low" in self.pr_impact_assessment.lower():
-            likelihood_emoji = "🟢"
-            likelihood = "Low"
-        else:
-            likelihood_emoji = "⚪"
-            likelihood = "Unlikely"
-
+        # Add likelihood header
+        likelihood_emoji, likelihood = self._extract_likelihood()
         parts.append(f"{likelihood_emoji} **Impact Likelihood:** {likelihood}\n\n")
 
-        # Add the assessment text (skip the first line if it contains "Likelihood:")
-        assessment_lines = self.pr_impact_assessment.split("\n")
-        assessment_text = "\n".join(
-            line for line in assessment_lines if not line.lower().startswith("likelihood:")
-        ).strip()
-
+        # Add assessment text
+        assessment_text = self._get_assessment_text()
         if assessment_text:
             parts.append(f"{assessment_text}\n\n")
 
-        # Add code snippets if available
-        if self.code_snippets:
-            parts.append("### 💡 Relevant Code Changes\n\n")
-
-            for filename, change_type, snippet in self.code_snippets:
-                # Create file link
-                if self.repository and self.pr_context:
-                    file_url = f"https://github.com/{self.repository}/blob/{self.pr_context.head_sha}/{filename}"
-                    parts.append(f"**[`{filename}`]({file_url})** ({change_type})\n\n")
-                else:
-                    parts.append(f"**`{filename}`** ({change_type})\n\n")
-
-                parts.append("<details>\n<summary>View changes</summary>\n\n")
-                parts.append(f"```diff\n{snippet}\n```\n\n")
-                parts.append("</details>\n\n")
-
-        # Add related changes table if available
-        if self.change_correlations:
-            high_conf = [c for c in self.change_correlations if c.confidence in ("high", "medium")]
-            if high_conf:
-                parts.append("### 📝 All Affected Files\n\n")
-
-                # Collect unique files with their confidence
-                file_confidence: dict[str, str] = {}
-                for corr in high_conf:
-                    for file_ref in corr.related_files:
-                        # Extract just the file path (remove extra text/descriptions)
-                        # Look for common file path patterns
-                        if ":" in file_ref:
-                            # Could be "file.py:123" or "text: file.py"
-                            parts_split = file_ref.split(":")
-                            # Take the part that looks most like a file path
-                            for part in parts_split:
-                                if "/" in part or part.endswith((".py", ".js", ".ts", ".go", ".java", ".md")):
-                                    file_ref = part.strip()
-                                    break
-
-                        # Keep highest confidence for each file
-                        if file_ref not in file_confidence or corr.confidence == "high":
-                            file_confidence[file_ref] = corr.confidence
-
-                # Format as a clean list with links if repository available
-                for file_ref, conf in sorted(file_confidence.items())[:10]:  # Top 10
-                    conf_badge = "🔴" if conf == "high" else "🟡"
-
-                    # Create GitHub file link if we have repository
-                    if self.repository and self.pr_context:
-                        file_url = f"https://github.com/{self.repository}/blob/{self.pr_context.head_sha}/{file_ref}"
-                        parts.append(f"- {conf_badge} [`{file_ref}`]({file_url})\n")
-                    else:
-                        parts.append(f"- {conf_badge} `{file_ref}`\n")
-
-                parts.append("\n")
+        # Add code snippets and affected files
+        parts.extend(self._format_code_snippets())
+        parts.extend(self._format_affected_files())
 
         return "".join(parts)
+
+    def _extract_likelihood(self) -> tuple[str, str]:
+        """Extract likelihood emoji and text from assessment."""
+        if not self.pr_impact_assessment:
+            return "⚪", "Unlikely"
+
+        assessment_lower = self.pr_impact_assessment.lower()
+
+        likelihood_map = {
+            "likelihood: high": ("🔴", "High"),
+            "likelihood: medium": ("🟡", "Medium"),
+            "likelihood: low": ("🟢", "Low"),
+        }
+
+        for pattern, (emoji, text) in likelihood_map.items():
+            if pattern in assessment_lower:
+                return emoji, text
+
+        return "⚪", "Unlikely"
+
+    def _get_assessment_text(self) -> str:
+        """Get assessment text without the likelihood line."""
+        if not self.pr_impact_assessment:
+            return ""
+
+        assessment_lines = self.pr_impact_assessment.split("\n")
+        return "\n".join(line for line in assessment_lines if not line.lower().startswith("likelihood:")).strip()
+
+    def _format_code_snippets(self) -> list[str]:
+        """Format code snippets section."""
+        if not self.code_snippets:
+            return []
+
+        parts = ["### 💡 Relevant Code Changes\n\n"]
+
+        for filename, change_type, snippet in self.code_snippets:
+            file_header = self._create_file_header(filename, change_type)
+            parts.append(f"{file_header}\n\n")
+            parts.append("<details>\n<summary>View changes</summary>\n\n")
+            parts.append(f"```diff\n{snippet}\n```\n\n")
+            parts.append("</details>\n\n")
+
+        return parts
+
+    def _create_file_header(self, filename: str, change_type: str) -> str:
+        """Create file header with optional link."""
+        if self.repository and self.pr_context:
+            file_url = f"https://github.com/{self.repository}/blob/{self.pr_context.head_sha}/{filename}"
+            return f"**[`{filename}`]({file_url})** ({change_type})"
+        return f"**`{filename}`** ({change_type})"
+
+    def _format_affected_files(self) -> list[str]:
+        """Format affected files section."""
+        if not self.change_correlations:
+            return []
+
+        high_conf = [c for c in self.change_correlations if c.confidence in ("high", "medium")]
+        if not high_conf:
+            return []
+
+        parts = ["### 📝 All Affected Files\n\n"]
+        file_confidence = self._collect_file_confidence(high_conf)
+
+        for file_ref, conf in sorted(file_confidence.items())[:10]:
+            conf_badge = "🔴" if conf == "high" else "🟡"
+            file_line = self._create_file_line(file_ref, conf_badge)
+            parts.append(f"{file_line}\n")
+
+        parts.append("\n")
+        return parts
+
+    def _collect_file_confidence(self, correlations: list[CorrelationResult]) -> dict[str, str]:
+        """Collect unique files with their highest confidence level."""
+        file_confidence: dict[str, str] = {}
+
+        for corr in correlations:
+            for file_ref in corr.related_files:
+                cleaned_ref = self._extract_file_path(file_ref)
+                # Keep highest confidence for each file
+                if cleaned_ref not in file_confidence or corr.confidence == "high":
+                    file_confidence[cleaned_ref] = corr.confidence
+
+        return file_confidence
+
+    def _extract_file_path(self, file_ref: str) -> str:
+        """Extract clean file path from reference string."""
+        if ":" not in file_ref:
+            return file_ref
+
+        # Could be "file.py:123" or "text: file.py"
+        parts_split = file_ref.split(":")
+        for part in parts_split:
+            if "/" in part or part.endswith((".py", ".js", ".ts", ".go", ".java", ".md")):
+                return part.strip()
+
+        return file_ref
+
+    def _create_file_line(self, file_ref: str, conf_badge: str) -> str:
+        """Create file line with optional GitHub link."""
+        if self.repository and self.pr_context:
+            file_url = f"https://github.com/{self.repository}/blob/{self.pr_context.head_sha}/{file_ref}"
+            return f"- {conf_badge} [`{file_ref}`]({file_url})"
+        return f"- {conf_badge} `{file_ref}`"
 
     def _format_evidence_section(self) -> str:
         """Format the Evidence section with grouped failures."""
@@ -262,64 +298,71 @@ class RCAReport:
             return ""
 
         parts = ["## 📊 Evidence\n\n"]
-
-        # Group similar failures
         groups = self._group_similar_failures()
 
         for step_name, analyses in groups.items():
-            # If multiple jobs failed the same step, group them
             if len(analyses) > 1:
-                job_names = [a.job_name for a in analyses]
-                parts.append(f"### ❌ {step_name}\n\n")
-                parts.append(f"**Failed in {len(analyses)} jobs:** {', '.join(job_names)}\n\n")
-
-                # Use the first analysis as representative
-                representative = analyses[0]
-                parts.append(f"**Category:** {representative.failure_category}\n\n")
-                parts.append(f"**Root Cause:** {representative.root_cause}\n\n")
-
-                # Show evidence from the first occurrence
-                if representative.evidence:
-                    # Use LLM to select most useful, non-redundant evidence
-                    useful_evidence = self._select_useful_evidence(representative.evidence, representative.root_cause)
-                    if useful_evidence:
-                        parts.append("<details>\n<summary>📋 <b>View Detailed Evidence</b></summary>\n\n")
-                        for item in useful_evidence:
-                            source = item.get("source", "unknown")
-                            content = item.get("content", "").replace("`", "'").strip()
-
-                            # Truncate very long content
-                            if len(content) > 500:
-                                content = content[:500] + "\n... (truncated)"
-
-                            parts.append(f"**Source:** `{source}`\n\n")
-                            parts.append(f"```\n{content}\n```\n\n")
-                        parts.append("</details>\n\n")
+                parts.extend(self._format_multiple_failures(step_name, analyses))
             else:
-                # Single failure - show normally
-                analysis = analyses[0]
-                parts.append(f"### ❌ {analysis.job_name} / {step_name}\n\n")
-                parts.append(f"**Category:** {analysis.failure_category}\n\n")
-                parts.append(f"**Root Cause:** {analysis.root_cause}\n\n")
-
-                if analysis.evidence:
-                    # Use LLM to select most useful, non-redundant evidence
-                    useful_evidence = self._select_useful_evidence(analysis.evidence, analysis.root_cause)
-                    if useful_evidence:
-                        parts.append("<details>\n<summary>📋 <b>View Detailed Evidence</b></summary>\n\n")
-                        for item in useful_evidence:
-                            source = item.get("source", "unknown")
-                            content = item.get("content", "").replace("`", "'").strip()
-
-                            # Truncate very long content
-                            if len(content) > 500:
-                                content = content[:500] + "\n... (truncated)"
-
-                            parts.append(f"**Source:** `{source}`\n\n")
-                            parts.append(f"```\n{content}\n```\n\n")
-                        parts.append("</details>\n\n")
+                parts.extend(self._format_single_failure(step_name, analyses[0]))
 
         return "".join(parts)
+
+    def _format_multiple_failures(self, step_name: str, analyses: list[StepAnalysis]) -> list[str]:
+        """Format section for multiple jobs failing the same step."""
+        parts = []
+        job_names = [a.job_name for a in analyses]
+        parts.append(f"### ❌ {step_name}\n\n")
+        parts.append(f"**Failed in {len(analyses)} jobs:** {', '.join(job_names)}\n\n")
+
+        representative = analyses[0]
+        parts.append(f"**Category:** {representative.failure_category}\n\n")
+        parts.append(f"**Root Cause:** {representative.root_cause}\n\n")
+
+        parts.extend(self._format_evidence_details(representative))
+        return parts
+
+    def _format_single_failure(self, step_name: str, analysis: StepAnalysis) -> list[str]:
+        """Format section for a single failure."""
+        parts = []
+        parts.append(f"### ❌ {analysis.job_name} / {step_name}\n\n")
+        parts.append(f"**Category:** {analysis.failure_category}\n\n")
+        parts.append(f"**Root Cause:** {analysis.root_cause}\n\n")
+
+        parts.extend(self._format_evidence_details(analysis))
+        return parts
+
+    def _format_evidence_details(self, analysis: StepAnalysis) -> list[str]:
+        """Format evidence details if available."""
+        if not analysis.evidence:
+            return []
+
+        useful_evidence = self._select_useful_evidence(analysis.evidence, analysis.root_cause)
+        if not useful_evidence:
+            return []
+
+        parts = ["<details>\n<summary>📋 <b>View Detailed Evidence</b></summary>\n\n"]
+        parts.extend(self._format_evidence_items(useful_evidence))
+        parts.append("</details>\n\n")
+        return parts
+
+    def _format_evidence_items(self, evidence_items: list[dict[str, Any]]) -> list[str]:
+        """Format individual evidence items."""
+        parts = []
+        for item in evidence_items:
+            source = item.get("source", "unknown")
+            content = self._truncate_content(item.get("content", ""))
+
+            parts.append(f"**Source:** `{source}`\n\n")
+            parts.append(f"```\n{content}\n```\n\n")
+        return parts
+
+    def _truncate_content(self, content: str) -> str:
+        """Truncate and clean content for display."""
+        content = content.replace("`", "'").strip()
+        if len(content) > 500:
+            return content[:500] + "\n... (truncated)"
+        return content
 
     def to_markdown(self) -> str:
         """Generate markdown formatted report with leak detection."""
@@ -440,19 +483,39 @@ class FailureAnalyzer(dspy.Module):  # type: ignore[misc]
 
         step_context = self._get_step_context(job, step)
         log_content = self._read_log_content(job, step)
+        pr_context_str = self._prepare_pr_context_for_step(job, step)
 
-        # Prepare PR context if available
-        pr_context_str = ""
-        if self.pr_context:
-            related_files = find_related_files(self.pr_context, f"{job.name}/{step.name}")
-            if related_files:
-                changes_summary = summarize_changes(self.pr_context, max_files=10)
-                relevant_diffs = get_relevant_diffs(self.pr_context, related_files)
-                pr_context_str = f"{changes_summary}\n\n{relevant_diffs}"
-            else:
-                pr_context_str = summarize_changes(self.pr_context, max_files=10)
+        result = self._attempt_step_analysis_with_retry(
+            job, step, log_content, step_context, pr_context_str, max_retries
+        )
+        return result
 
+    def _prepare_pr_context_for_step(self, job: JobResult, step: StepResult) -> str:
+        """Prepare PR context string for step analysis."""
+        if not self.pr_context:
+            return ""
+
+        related_files = find_related_files(self.pr_context, f"{job.name}/{step.name}")
+        changes_summary = summarize_changes(self.pr_context, max_files=10)
+
+        if related_files:
+            relevant_diffs = get_relevant_diffs(self.pr_context, related_files)
+            return f"{changes_summary}\n\n{relevant_diffs}"
+
+        return changes_summary
+
+    def _attempt_step_analysis_with_retry(
+        self,
+        job: JobResult,
+        step: StepResult,
+        log_content: str,
+        step_context: str,
+        pr_context_str: str,
+        max_retries: int,
+    ) -> StepAnalysis:
+        """Attempt step analysis with retry logic."""
         last_error: Exception | None = None
+
         for attempt in range(1, max_retries + 1):
             try:
                 result = self.step_analyzer(
@@ -462,17 +525,7 @@ class FailureAnalyzer(dspy.Module):  # type: ignore[misc]
                     pr_context=pr_context_str,
                 )
 
-                # Parse evidence JSON
-                evidence_list = []
-                try:
-                    raw_evidence = result.evidence or "[]"
-                    sanitized_evidence = _sanitize_json_string(raw_evidence)
-                    evidence_list = json.loads(sanitized_evidence)
-                    if not isinstance(evidence_list, list):
-                        evidence_list = []
-                except (json.JSONDecodeError, TypeError) as e:
-                    logger.warning(f"Failed to parse evidence JSON for {step.name}: {e}")
-                    evidence_list = []
+                evidence_list = self._parse_step_evidence(result.evidence, step.name)
 
                 return StepAnalysis(
                     job_name=job.name,
@@ -483,24 +536,46 @@ class FailureAnalyzer(dspy.Module):  # type: ignore[misc]
                 )
             except (json.JSONDecodeError, KeyError) as e:
                 last_error = e
-                if attempt < max_retries:
-                    delay = RETRY_BASE_DELAY * (2 ** (attempt - 1))
-                    logger.warning(
-                        f"Step {step.name} attempt {attempt}/{max_retries} failed: {e}. Retrying in {delay:.1f}s..."
-                    )
-                    time.sleep(delay)
-                else:
-                    logger.error(f"Step {step.name} failed after {max_retries} attempts: {e}")
+                if not self._handle_retryable_error(e, step.name, attempt, max_retries):
+                    break
             except Exception as e:
                 logger.error(f"Step {step.name}: analysis failed: {e}")
                 last_error = e
                 break
 
+        return self._create_failed_step_analysis(job, step, last_error)
+
+    def _parse_step_evidence(self, raw_evidence: str | None, step_name: str) -> list[dict[str, str]]:
+        """Parse and validate evidence JSON."""
+        try:
+            raw_evidence = raw_evidence or "[]"
+            sanitized_evidence = _sanitize_json_string(raw_evidence)
+            evidence_list = json.loads(sanitized_evidence)
+            return evidence_list if isinstance(evidence_list, list) else []
+        except (json.JSONDecodeError, TypeError) as e:
+            logger.warning(f"Failed to parse evidence JSON for {step_name}: {e}")
+            return []
+
+    def _handle_retryable_error(self, error: Exception, step_name: str, attempt: int, max_retries: int) -> bool:
+        """Handle retryable errors and return True if should retry."""
+        if attempt < max_retries:
+            delay = RETRY_BASE_DELAY * (2 ** (attempt - 1))
+            logger.warning(
+                f"Step {step_name} attempt {attempt}/{max_retries} failed: {error}. Retrying in {delay:.1f}s..."
+            )
+            time.sleep(delay)
+            return True
+
+        logger.error(f"Step {step_name} failed after {max_retries} attempts: {error}")
+        return False
+
+    def _create_failed_step_analysis(self, job: JobResult, step: StepResult, error: Exception | None) -> StepAnalysis:
+        """Create a StepAnalysis for a failed analysis attempt."""
         return StepAnalysis(
             job_name=job.name,
             step_name=step.name,
             failure_category="unknown",
-            root_cause=f"Analysis failed: {str(last_error)}",
+            root_cause=f"Analysis failed: {str(error)}",
             evidence=[],
         )
 
@@ -508,24 +583,41 @@ class FailureAnalyzer(dspy.Module):  # type: ignore[misc]
         """Analyze a single test failure with retry logic."""
         logger.info(f"Analyzing test: {test.test_identifier}")
 
+        details = self._preprocess_test_details(test)
+        pr_context_str = self._prepare_pr_context_for_test(test)
+
+        result = self._attempt_test_analysis_with_retry(test, details, pr_context_str, max_retries)
+        return result
+
+    def _preprocess_test_details(self, test: FailedTest) -> str:
+        """Preprocess test details if preprocessor is available."""
         details = test.combined_details
         if self.preprocessor:
             details = self.preprocessor.preprocess(
                 details, f"test:{test.test_identifier}", max_tokens=self.tokens_per_test
             )
+        return details
 
-        # Prepare PR context if available
-        pr_context_str = ""
-        if self.pr_context:
-            related_files = find_related_files(self.pr_context, test.test_identifier)
-            if related_files:
-                changes_summary = summarize_changes(self.pr_context, max_files=10)
-                relevant_diffs = get_relevant_diffs(self.pr_context, related_files)
-                pr_context_str = f"{changes_summary}\n\n{relevant_diffs}"
-            else:
-                pr_context_str = summarize_changes(self.pr_context, max_files=10)
+    def _prepare_pr_context_for_test(self, test: FailedTest) -> str:
+        """Prepare PR context string for test analysis."""
+        if not self.pr_context:
+            return ""
 
+        related_files = find_related_files(self.pr_context, test.test_identifier)
+        changes_summary = summarize_changes(self.pr_context, max_files=10)
+
+        if related_files:
+            relevant_diffs = get_relevant_diffs(self.pr_context, related_files)
+            return f"{changes_summary}\n\n{relevant_diffs}"
+
+        return changes_summary
+
+    def _attempt_test_analysis_with_retry(
+        self, test: FailedTest, details: str, pr_context_str: str, max_retries: int
+    ) -> TestFailureAnalysis:
+        """Attempt test analysis with retry logic."""
         last_error: Exception | None = None
+
         for attempt in range(1, max_retries + 1):
             try:
                 result = self.test_analyzer(
@@ -543,24 +635,34 @@ class FailureAnalyzer(dspy.Module):  # type: ignore[misc]
                 )
             except (json.JSONDecodeError, KeyError) as e:
                 last_error = e
-                if attempt < max_retries:
-                    delay = RETRY_BASE_DELAY * (2 ** (attempt - 1))
-                    logger.warning(
-                        f"Test {test.test_identifier} attempt {attempt}/{max_retries} failed: {e}. "
-                        f"Retrying in {delay:.1f}s..."
-                    )
-                    time.sleep(delay)
-                else:
-                    logger.error(f"Test {test.test_identifier} failed after {max_retries} attempts: {e}")
+                if not self._handle_test_retryable_error(e, test.test_identifier, attempt, max_retries):
+                    break
             except Exception as e:
                 logger.error(f"Test {test.test_identifier}: analysis failed: {e}")
                 last_error = e
                 break
 
+        return self._create_failed_test_analysis(test, last_error)
+
+    def _handle_test_retryable_error(self, error: Exception, test_id: str, attempt: int, max_retries: int) -> bool:
+        """Handle retryable errors for test analysis and return True if should retry."""
+        if attempt < max_retries:
+            delay = RETRY_BASE_DELAY * (2 ** (attempt - 1))
+            logger.warning(
+                f"Test {test_id} attempt {attempt}/{max_retries} failed: {error}. Retrying in {delay:.1f}s..."
+            )
+            time.sleep(delay)
+            return True
+
+        logger.error(f"Test {test_id} failed after {max_retries} attempts: {error}")
+        return False
+
+    def _create_failed_test_analysis(self, test: FailedTest, error: Exception | None) -> TestFailureAnalysis:
+        """Create a TestFailureAnalysis for a failed analysis attempt."""
         return TestFailureAnalysis(
             test_identifier=test.test_identifier,
             source_file=test.source_file,
-            root_cause_summary=f"Analysis failed: {str(last_error)}",
+            root_cause_summary=f"Analysis failed: {str(error)}",
         )
 
     def _analyze_all_test_failures(self, tests: list[FailedTest]) -> list[TestFailureAnalysis]:
@@ -676,78 +778,116 @@ class FailureAnalyzer(dspy.Module):  # type: ignore[misc]
             logger.debug("No PR context or correlations available for snippet extraction")
             return []
 
-        # Get files mentioned in actual errors
         error_files = self._extract_files_from_errors(step_analyses)
-
-        snippets = []
         high_conf = [c for c in correlations if c.confidence in ("high", "medium")]
         logger.info(f"Extracting code snippets from {len(high_conf)} high-confidence correlations")
 
-        # Collect all candidate files with priority scoring
-        candidate_files: list[tuple[str, int]] = []  # (filename, priority_score)
+        candidate_files = self._collect_candidate_files(high_conf, error_files)
+        snippets = self._extract_snippets_from_candidates(candidate_files, report_summary)
+
+        logger.info(f"Extracted {len(snippets)} code snippets")
+        return snippets
+
+    def _collect_candidate_files(
+        self, correlations: list[CorrelationResult], error_files: set[str]
+    ) -> list[tuple[str, int]]:
+        """Collect candidate files with priority scoring."""
+        candidate_files: list[tuple[str, int]] = []
         seen = set()
 
-        for corr in high_conf:
+        for corr in correlations:
             for file_ref in corr.related_files:
-                # Extract just the filename (remove line numbers and cleanup)
-                filename = file_ref.split(":")[0].strip()
-                filename = filename.strip("`'\"- ")
+                filename = self._clean_filename(file_ref)
 
                 if filename in seen:
                     continue
                 seen.add(filename)
 
-                # Calculate priority score
-                priority = 0
-                if corr.confidence == "high":
-                    priority += 10
-                else:  # medium
-                    priority += 5
-
-                # Boost priority if file appears in error messages
-                if filename in error_files:
-                    priority += 20
-                    logger.debug(f"Boosting priority for {filename} (appears in errors)")
-
+                priority = self._calculate_file_priority(filename, corr.confidence, error_files)
                 candidate_files.append((filename, priority))
 
-        # Sort by priority and take top 3
         candidate_files.sort(key=lambda x: x[1], reverse=True)
+        return candidate_files
+
+    def _clean_filename(self, file_ref: str) -> str:
+        """Extract and clean filename from file reference."""
+        filename = file_ref.split(":")[0].strip()
+        return filename.strip("`'\"- ")
+
+    def _calculate_file_priority(self, filename: str, confidence: str, error_files: set[str]) -> int:
+        """Calculate priority score for a file."""
+        priority = 10 if confidence == "high" else 5
+
+        if filename in error_files:
+            priority += 20
+            logger.debug(f"Boosting priority for {filename} (appears in errors)")
+
+        return priority
+
+    def _extract_snippets_from_candidates(
+        self, candidate_files: list[tuple[str, int]], report_summary: str
+    ) -> list[tuple[str, str, str]]:
+        """Extract snippets from top candidate files."""
+        snippets = []
 
         for filename, priority in candidate_files[:3]:
             logger.debug(f"Checking file: {filename} (priority: {priority})")
+            snippet = self._try_extract_snippet_for_file(filename, report_summary)
 
-            # Find this file in PR changes
-            for file_change in self.pr_context.changed_files:
-                if file_change.filename == filename and file_change.patch:
-                    logger.info(f"Extracting relevant diff section for {filename}")
+            if snippet:
+                snippets.append(snippet)
 
-                    # Ask LLM to extract relevant section
-                    try:
-                        result = self.diff_extractor(
-                            filename=filename,
-                            full_diff=file_change.patch,
-                            failure_summary=report_summary,
-                        )
-
-                        relevant_section = result.relevant_section.strip()
-
-                        # Only include if LLM found something relevant
-                        if relevant_section and "no directly relevant" not in relevant_section.lower():
-                            change_type = f"+{file_change.additions} -{file_change.deletions}"
-                            snippets.append((filename, change_type, relevant_section))
-                            logger.info(f"Added snippet for {filename} ({len(relevant_section)} chars)")
-                        else:
-                            logger.debug(f"LLM found no relevant changes in {filename}")
-                    except Exception as e:
-                        logger.warning(f"Failed to extract relevant diff section for {filename}: {e}")
-
-                    break
-            else:
-                logger.debug(f"File {filename} not found in PR changes or has no patch")
-
-        logger.info(f"Extracted {len(snippets)} code snippets")
         return snippets
+
+    def _try_extract_snippet_for_file(self, filename: str, report_summary: str) -> tuple[str, str, str] | None:
+        """Try to extract a snippet for a specific file."""
+        file_change = self._find_file_change(filename)
+
+        if not file_change:
+            logger.debug(f"File {filename} not found in PR changes or has no patch")
+            return None
+
+        return self._extract_diff_snippet(filename, file_change, report_summary)
+
+    def _find_file_change(self, filename: str) -> FileChange | None:
+        """Find file change in PR context."""
+        if not self.pr_context:
+            return None
+
+        for file_change in self.pr_context.changed_files:
+            if file_change.filename == filename and file_change.patch:
+                return file_change
+        return None
+
+    def _extract_diff_snippet(
+        self, filename: str, file_change: FileChange, report_summary: str
+    ) -> tuple[str, str, str] | None:
+        """Extract relevant diff snippet using LLM."""
+        logger.info(f"Extracting relevant diff section for {filename}")
+
+        try:
+            result = self.diff_extractor(
+                filename=filename,
+                full_diff=file_change.patch,
+                failure_summary=report_summary,
+            )
+
+            relevant_section = result.relevant_section.strip()
+
+            if self._is_relevant_section(relevant_section):
+                change_type = f"+{file_change.additions} -{file_change.deletions}"
+                logger.info(f"Added snippet for {filename} ({len(relevant_section)} chars)")
+                return (filename, change_type, relevant_section)
+
+            logger.debug(f"LLM found no relevant changes in {filename}")
+            return None
+        except Exception as e:
+            logger.warning(f"Failed to extract relevant diff section for {filename}: {e}")
+            return None
+
+    def _is_relevant_section(self, section: str) -> bool:
+        """Check if extracted section is relevant."""
+        return bool(section and "no directly relevant" not in section.lower())
 
     def _create_synthesis_context(
         self,
