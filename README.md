@@ -366,6 +366,8 @@ env:
 to the job as in the example below:
 ```
 - uses: calebevans/gha-failure-analysis@v1
+  env:
+    USER: root
   with:
     llm-provider: openai
     llm-model: gpt-4o
