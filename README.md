@@ -142,6 +142,11 @@ PR context analysis is **enabled by default** for PR-triggered runs. To customiz
 
 ## Configuration
 
+### Github Settings
+
+This workflow uses the default github-token to fetch the execution logs, depending on the specific repo permission setting the user might need to either set a [private access token](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens) or create a [github app and set its keys](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/managing-private-keys-for-github-apps)
+
+
 ### Required Inputs
 
 | Input | Description | Example |
@@ -343,3 +348,28 @@ The action automatically detects and redacts secrets from all outputs using [det
 - PR comments
 - JSON reports
 - Console logs
+
+
+## Troubleshooting
+
+# GitHub Runner OS User Permission
+
+In some repos this workflow might fail with the following error message:
+```
+gha_failure_analysis.main - ERROR - Fatal error: 'getpwuid(): uid not found: 1001'
+```
+In that case, add 
+```
+env:
+  USER: root
+```
+to the job as in the example below:
+```
+- uses: calebevans/gha-failure-analysis@v1
+  with:
+    llm-provider: openai
+    llm-model: gpt-4o
+    llm-api-key: ${{ secrets.OPENAI_API_KEY }}
+    analyze-pr-context: true  # Default: true
+    pr-context-token-budget: 20  # % of context for PR diffs (default: 20%)  
+```
