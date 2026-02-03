@@ -142,6 +142,11 @@ PR context analysis is **enabled by default** for PR-triggered runs. To customiz
 
 ## Configuration
 
+### Github Settings
+
+This workflow uses the default github-token to fetch the execution logs, depending on the specific repo permission setting the user might need to either set a [private access token](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens) or create a [github app and set its keys](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/managing-private-keys-for-github-apps)
+
+
 ### Required Inputs
 
 | Input | Description | Example |
