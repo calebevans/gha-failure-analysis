@@ -72,6 +72,6 @@ outputs:
 
 runs:
   using: 'docker'
-  image: 'docker://ghcr.io/calebevans/gha-failure-analysis:0.1.9'
+  image: 'docker://ghcr.io/calebevans/gha-failure-analysis:0.2.0'
   args:
     - analyze
