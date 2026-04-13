@@ -14,7 +14,7 @@ dependencies = [
     "dspy>=2.5.0",
     "click>=8.1.0",
     "pydantic>=2.0.0",
-    "tokenizers>=0.13.0",
+    "tokenizers>=0.22.2",
     "detect-secrets>=1.4.0",
 ]
 
