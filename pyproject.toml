@@ -9,7 +9,7 @@ authors = [
     {name = "Caleb Evans", email = "caevans@redhat.com"}
 ]
 dependencies = [
-    "PyGithub>=2.1.0",
+    "PyGithub>=2.9.0",
     "cordon>=1.0.0",
     "dspy>=2.5.0",
     "click>=8.1.0",
